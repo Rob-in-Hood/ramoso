@@ -1,6 +1,6 @@
 # Ramoso architecture
 
-Nov 18, 2026 · @Larisa
+Nov 18, 2026 · @Larisa · updated Nov 19, 2026 after the spike (§11)
 
 This document describes how Ramoso is built. What it does, screen by screen, is in [interface-spec.md](interface-spec.md). Section numbers like “spec §4” point there.
 
@@ -40,7 +40,10 @@ This document describes how Ramoso is built. What it does, screen by screen, is 
 | UI state | Zustand |
 | Forms | React Hook Form and Zod, only where a screen has a real form (Clone, Create, Settings, Create tag, …) |
 | Tests | Vitest, Playwright, Rust `cargo test`; WebdriverIO smoke tests later |
-| Git | Bundled portable Git (dugite-native builds), always |
+| Git | Always bundled: our own static build on Linux (§9); dugite-native builds on Windows and macOS |
+| Credentials | OS password store via `keyring-core` and the platform store crates; Ramoso is Git's credential helper |
+| Linux AppImage | quick-sharun, built in an Arch container (bundles glibc) |
+| Windows installer | NSIS, cross-compiled on Linux in a Debian container (`cargo-xwin`) |
 
 Not used: Next.js (Tauri serves a static bundle; nothing uses server rendering) and TanStack Router (no URLs or back/forward in the spec; see §9).
 
@@ -50,11 +53,14 @@ Not used: Next.js (Tauri serves a static bundle; nothing uses server rendering) 
 | --- | --- | --- |
 | How Ramoso talks to Git | Run the bundled `git` program for every read and write | A Rust Git library (gitoxide) for fast reads: those reads would be invisible in the Console (spec goal 3), and it means two Git implementations to trust and parse |
 | Which Git | Always the bundled one | System Git when new enough: version drift, untested output formats |
+| Git on Linux | Static Git built from source (musl, our own static curl) | dugite's Linux build: needs glibc 2.34, so it fails on older distros such as openSUSE Leap 15.4 (glibc 2.31) |
 | Word diff and moved lines | Get the plain patch from Git, compute word diff and moves in Rust | Parse `--color-moved` output: means reading colour codes back out of terminal output |
 | Screen navigation | A screen value in Zustand | TanStack Router: typed parameters, but the spec has no URLs or history |
 | Data from Rust | TanStack Query, invalidated by file-watch events | Zustand only: every screen would hand-write loading, caching and refresh |
 | App data | JSON files plus a per-repo append-only Activity log | SQLite: nothing needs real queries yet |
-| Sign-in | Git Credential Manager (bundled) for HTTPS, `keyring` for pasted tokens | A browser sign-in flow per host: much more code per host |
+| Sign-in | Ramoso as Git's credential helper, tokens in the OS store via `keyring-core`; pasted tokens first, browser sign-in later (roadmap milestone 14) | Git Credential Manager: 79 MB of .NET on Linux, and a second sign-in system next to the one the provider layer needs anyway |
+| Linux packaging | AppImage via quick-sharun (bundles every library, glibc included) | Tauri's own AppImage step (linuxdeploy): misses WebKit's helper programs on non-Debian layouts, so the app crashes on start |
+| CI | Postponed; builds run locally in Docker | GitHub Actions now: not needed yet; Windows is tested by hand |
 | Tests | Vitest + Playwright (mocked Rust) + Rust tests on real repos | Playwright alone: never touches Rust or real Git |
 | License | MIT OR Apache-2.0 | GPL-3.0 |
 
@@ -76,12 +82,12 @@ Not used: Next.js (Tauri serves a static bundle; nothing uses server rendering) 
 │ ops      writes: preview → snapshot → run → record in Activity          │
 │ git      runner: bundled git, environment, queue, Console log, masking  │
 │ watch    folder watcher → "repo-changed" events                         │
-│ creds    password store (GCM + keyring)                                 │
+│ creds    OS password store (keyring) + Git credential helper            │
 │ hosts    provider seam: GitHub, GitLab adapters                         │
 │ store    settings, repo list, push queue (JSON)                         │
 └─────────────────────────────────────┬───────────────────────────────────┘
                                       │ child processes
-                          bundled git (+ LFS, GCM, sh on Windows)
+                          bundled git (+ LFS; sh on Windows)
 ```
 
 The rule: React never knows how Git works. It asks Rust for typed data (“the status of this repo”, “page 3 of the log”) and for actions (“preview a reset of main to 98ad0c3”, “run it”). Rust never renders anything.
@@ -101,15 +107,18 @@ git::run(repo: &RepoPath, args: &[&str], opts: RunOpts) -> Result<Output, GitErr
 
 Behind it:
 
-- **Binary and environment.** Resolves the bundled Git from `BaseDirectory::Resource` and sets the variables it needs (as GitHub Desktop does):
-  - all OSes: `GIT_EXEC_PATH`
-  - Linux, macOS: `GIT_CONFIG_SYSTEM`, `GIT_TEMPLATE_DIR`
-  - Linux: `PREFIX`, `GIT_SSL_CAINFO` (bundled CA file, unless the user set one)
-  - Windows: Git’s `bin` and `usr\bin` folders first in `PATH`
+- **Where the bundled Git is.** Inside an AppImage (`APPIMAGE` and `APPDIR` set): `$APPDIR/git`. Everywhere else: Tauri’s `BaseDirectory::Resource`. Tauri’s own AppImage lookup can’t be used: quick-sharun rewrites the `/usr/lib` text inside it (see “No hardcoded system paths” below).
+- **Binary and environment, Linux.** Our static Git is built with `RUNTIME_PREFIX`, so it finds its helpers next to itself; `GIT_EXEC_PATH`, `PREFIX` and `GIT_TEMPLATE_DIR` are not needed. Our curl has no built-in certificate path, so Ramoso always sets `GIT_SSL_CAINFO` to the first system bundle found (Debian/Ubuntu/Arch, Fedora/RHEL and openSUSE locations), unless the user set one. Using the system bundle keeps company CAs working.
+- **Binary and environment, Windows.** Run `cmd\git.exe`, Git for Windows’ launcher, which sets up its own paths (including `usr\bin\sh.exe` for hooks). TLS uses Windows’ certificate store (`sslBackend = schannel` in the bundle’s config). Every Git process is started with `CREATE_NO_WINDOW` (0x08000000), or each call flashes a console window; the hooks Git starts stay hidden too (tested). Environment variable names are compared without case (Windows spells it `Path`). Paths from Tauri are turned from `\\?\E:\…` back into `E:\…`, because some tools can’t read the long form.
+- **Binary and environment, macOS.** dugite-native’s variables (`GIT_EXEC_PATH`, `GIT_CONFIG_SYSTEM`, `GIT_TEMPLATE_DIR`); not yet tested.
 - **User environment for hooks.** On Linux and macOS the app may start from a desktop menu with a bare `PATH`. At startup Ramoso runs the login shell once (`$SHELL -l -i -c 'env -0'`, with a timeout) and uses that environment as the base for every Git process, so hooks find node, asdf and nvm shims. If it fails or times out, the app’s own environment is used and the Console says so. Windows apps already get the user’s full environment.
 - **Working folder.** Always the repository (or worktree) root. Hooks run there, as in the terminal.
 - **Fixed flags.** `--no-pager`, `-c core.quotepath=off`, `-c color.ui=false`; `GIT_OPTIONAL_LOCKS=0` for background reads so a status refresh never takes `index.lock`.
 - **Prompts.** `GIT_TERMINAL_PROMPT=0`. Credential and SSH passphrase prompts go through Ramoso’s own ask-pass helper (§5.6) so they appear as dialogs, never hang.
+- **Nothing outside Ramoso answers prompts.** `GIT_ASKPASS` and `SSH_ASKPASS` are never inherited; Ramoso always sets its own. Every call starts with `-c credential.helper=` (clears helpers from the user’s config and the bundle’s system config, which sets `manager` on Windows) before adding Ramoso’s helper. During the spike an inherited `SSH_ASKPASS` (KDE’s `ksshaskpass`) answered silently with a real token from KWallet.
+- **No secrets in arguments.** Tokens and passwords never appear on a command line (they would show in `ps` and shell history); they go through stdin or the credential protocol.
+- **Output.** stdout and stderr are kept separate (the Console shows both; the spike glued them together and mixed Git’s output with the hook’s).
+- **No hardcoded system paths.** quick-sharun rewrites every `/usr/lib/…` and `/usr/share/…` string in the AppImage’s program to a random `/tmp/…` path. Ramoso’s code never contains such strings.
 - **Queue.** Per repository, writes run one at a time in order; reads run in parallel. Background fetch counts as a write.
 - **Console log.** Every call becomes a Console entry: time, command, source, duration, exit code, stdout and stderr, background flag. Entries stream to the UI over an event; the last 1,000 per session are kept in memory.
 - **Secret masking.** Tokens in URLs (`https://user:token@…`) and known token formats are replaced with `••••` before anything reaches the log or the UI.
@@ -145,7 +154,7 @@ Input: Git’s patch text. Output: a typed model the diff viewer renders.
 - **Moved lines:** matches blocks of removed lines with blocks of added lines across all files in the diff; matched blocks become “moved to N” / “moved from N”.
 - **Line staging:** builds a patch from the selected lines (a partial pair becomes a deletion plus an addition, as with `git add -p`) and applies it with `git apply --cached` (or `--reverse` to unstage or discard).
 
-The diff library is chosen in the spike (candidate: the `similar` crate). This is the most algorithm-heavy part of Ramoso and gets the most unit tests.
+The diff library is `similar` 3.x. In the spike, a 20,000-line file (1.6 MB) took under 10 ms for the line diff plus word highlights, and 3.3 ms for the worst case (two unrelated files). `similar` has no moved-line detection; that is Ramoso’s own block matching on top, still untested for speed. Limits (roadmap milestone 4): ≤ 50 ms for line diff, word highlights and moved-line matching on a 20,000-line file; ≤ 100 ms from click to the diff on screen. Diffs run with a timeout (2 s), after which `similar` returns an approximate result. This is the most algorithm-heavy part of Ramoso and gets the most unit tests.
 
 ### 5.4 `ops`: every action that changes the repository
 
@@ -177,19 +186,28 @@ Behind it:
 
 ### 5.6 `creds`: credentials
 
-Secrets live only in the OS password store: Secret Service on Linux (KWallet, GNOME Keyring), Credential Manager on Windows, Keychain on macOS. The OS encrypts them and unlocks them at login, so restarts don’t ask again.
+Secrets live only in the OS password store. The OS encrypts them and unlocks them at login, so restarts don’t ask again. Only OS stores; no separate password managers (1Password, Bitwarden, `pass`).
+
+How it works:
+
+- **`keyring-core` with the platform store crates, tried in order:** Linux: Secret Service (`zbus-secret-service-keyring-store`), then the kernel keyring (`linux-keyutils-keyring-store`, kept until logout or reboot). Windows: Credential Manager. macOS: the login keychain (the “protected” store needs a signed app). A store that can’t start is left out and logged.
+- **Saving reports whether the secret survives a restart.** With no working store the secret stays in memory only, and Ramoso tells the user they will have to sign in again after restarting. Plain-text files are never used.
+- **Secrets are stored as bytes, not passwords:** Windows keeps passwords as UTF-16 capped at 2,560 bytes, which long tokens can exceed.
+- **Store calls run off the async threads** (they block on D-Bus or OS APIs). The Linux store uses `async-io`, keeping its D-Bus calls independent of Tauri’s tokio runtime.
+- **Secrets never reach the webview.** Rust keeps them; React sees only account names and whether sign-in is remembered.
+- **Tests** use a mock store and an always-unavailable store, so the fallback and memory-only paths are covered.
 
 | Secret | Stored by |
 | --- | --- |
-| GitHub / GitLab sign-in (HTTPS) | Git Credential Manager (bundled), browser sign-in, saved to the password store |
-| Token for API calls (PR review) | The same entry, read back with `git credential fill` |
-| Login and password or token for other hosts | Asked once in a Ramoso dialog with “Remember” ticked; saved through Git’s credential helper |
-| Pasted tokens (Accounts) | `keyring` crate |
-| SSH key passphrase | ssh-agent if running; otherwise optionally remembered in the password store and supplied through `SSH_ASKPASS` |
+| Token for GitHub, GitLab or any host (HTTPS and API) | Pasted once in Accounts, saved by Ramoso in the OS store. Browser sign-in for GitHub and GitLab.com comes later (roadmap milestone 14) |
+| Login and password for other hosts | Asked once in a Ramoso dialog with “Remember” ticked; Ramoso saves it itself |
+| SSH key passphrase | ssh-agent if running; otherwise optionally remembered in the OS store and supplied through `SSH_ASKPASS` |
 | GPG passphrase | gpg-agent, as in the terminal |
 
-- **Ask-pass helper:** the Ramoso executable itself, started by Git with a special argument (`GIT_ASKPASS`, `SSH_ASKPASS`). It forwards the prompt to the running app, which shows a dialog and returns the answer.
-- **No password store on Linux:** `keyring` falls back to the kernel keyring (kept until logout or reboot), and Ramoso explains that installing KWallet or GNOME Keyring makes sign-in permanent. Plain-text files are never used.
+- **Ramoso is Git’s credential helper.** The Ramoso executable, started by Git with the credential protocol (`get`, `store`, `erase` on stdin). `get` answers from the OS store with the account’s real username and the token. With nothing stored it answers `quit=1`, so Git asks no other source. Git’s `store` and `erase` don’t save anything: Ramoso saves credentials itself, from the Accounts screen or the sign-in dialog.
+- **Token refresh is done by the running app, one at a time.** The helper asks the app instead of refreshing itself, because some hosts replace both tokens on every refresh (GitLab), so two Git commands refreshing at once would lock each other out.
+- **Ask-pass helper:** the same executable, started by Git through `GIT_ASKPASS` and `SSH_ASKPASS`. It forwards the prompt to the running app, which shows a dialog and returns the answer. Tested: HTTPS login prompts and SSH passphrase prompts reach it.
+- **Which store answers on Linux depends on the desktop.** Secret Service is provided by whichever program owns `org.freedesktop.secrets` on the session bus: GNOME Keyring, KWallet, KeePassXC… On the test machine (KDE Plasma, KWallet 5.90) it was GNOME Keyring, so tokens did not appear in KWalletManager. Settings → Accounts shows where secrets are stored (“Stored in: GNOME Keyring”), from that bus owner.
 - Sign out deletes the entry. An expired credential opens “Sign-in failed” (spec §7).
 
 ### 5.7 `hosts`: the provider seam
@@ -239,6 +257,7 @@ Snapshots and Activity entries older than the retention period (default 30 days)
 - **Events** for app-wide signals: `repo-changed`, `console-entry`, `sync-state`, `offline`.
 - **`src/lib/ipc.ts`** is the only file that calls `invoke` or `listen`. Its types mirror the Rust types by hand. Generating them (for example with `tauri-specta`) is a later option if drift becomes a problem.
 - **Permissions:** the capability file grants only the window controls, dialog, store and opener permissions the app uses.
+- **Content Security Policy:** strict, never `null` (the Tauri template’s default). Only the app’s own scripts and styles; no remote code.
 
 ## 7. Frontend
 
@@ -295,12 +314,19 @@ The three widths from spec §2 (≥ 1280, 1000–1279, < 1000) are Tailwind brea
 
 Playwright can’t drive the Tauri window itself; that’s why the scenario tests run against the browser build with Rust mocked, and the Rust side is tested on real repos.
 
-## 9. Build, CI and releases
+## 9. Build and releases
 
-- **Repository layout:** `src/` (React), `src-tauri/` (Rust), `docs/`, `e2e/` (Playwright).
-- **Bundled Git:** a script downloads the pinned dugite-native release for the target platform, checks its SHA-256, and unpacks it into `src-tauri/resources/git/`. It is listed in `bundle.resources` and never committed. The pinned version lives in one file; updating Git is a one-line change plus a CI run.
-- **CI (GitHub Actions):** a matrix of `ubuntu-latest`, `windows-latest` and `macos-latest` runs lint, type checks and Rust tests; Vitest and Playwright run on Linux; every platform builds an installer.
-- **Releases:** Linux AppImage and `.deb`, Windows installer, macOS `.dmg` (unsigned until there’s a reason to sign).
+All builds run in Docker containers, as the current user, with caches in the project’s ignored `.cache/` folder. The setups were proven in the spike (branch `feat/platform-risks-spike`) and are copied from there in milestone 1. CI is postponed.
+
+- **Repository layout:** `src/` (React), `src-tauri/` (Rust), `docs/`, `e2e/` (Playwright), `build/` (the Docker setups below).
+- **Tool manifest.** One file lists every bundled tool with version, download URL and SHA-256: Git (source), curl (source), Git LFS, and the dugite-native Windows and macOS builds. Every build reads it; nothing is downloaded or copied by hand. Updating Git is one line.
+- **Linux Git:** built from source in an Alpine container: static (musl), our own static curl (Alpine’s links libidn2, whose `error()` clashes with Git’s in a static link), `RUNTIME_PREFIX`, Rust part enabled. The build fails if anything links dynamically. About 37 MB after pruning to `git`, `git-remote-http`, `git-http-fetch`, Git LFS and the helper scripts. `strip` runs only on real binaries and its errors are not hidden.
+- **Linux app: AppImage.** In an Arch container (packages from a dated archive snapshot): `tauri build --no-bundle`, then quick-sharun (pinned by commit and checksum) packs the app with every library, glibc included, so it runs on old and new distros. The build adds `WEBKIT_DISABLE_DMABUF_RENDERER=1` (WebKitGTK draws thick text with bundled graphics libraries on openSUSE Leap 15.4) and copies Git to `AppDir/git`. Size is about 165 MB; switching to quick-sharun’s debloated packages (no LLVM) should shrink it.
+- **Windows app: NSIS installer.** In a Debian container: Rust with the `x86_64-pc-windows-msvc` target, `cargo-xwin` (downloads the Windows SDK), LLD, `clang-cl`, and NSIS 3.11 (`makensis` built from source into Tauri’s NSIS package; Debian ships 3.08). About 48 MB. Installs per user, no admin rights; unsigned, so SmartScreen asks once (More info → Run anyway).
+- **macOS app:** built on a Mac (`tauri build --bundles dmg`).
+- **Shared Docker run settings:** one script holds the common `docker run` flags (user, `HOME`, cache folders, mount); the Dockerfiles share the Rust and pnpm setup instead of repeating it.
+- **Local pitfalls:** Homebrew on Linux puts its own `pkg-config` first in `PATH`, which can’t see system libraries, so host builds set `PKG_CONFIG=/usr/bin/pkg-config`. Docker without buildx needs `DOCKER_BUILDKIT=0` and `docker create` + `docker cp` to copy results out.
+- **Releases:** Linux AppImage, Windows installer, macOS `.dmg` (unsigned until there’s a reason to sign). A `.deb`/`.rpm` would need its own pipeline (the AppImage path uses `--no-bundle`).
 
 ## 10. Licensing
 
@@ -308,17 +334,35 @@ Playwright can’t drive the Tauri window itself; that’s why the scenario test
 - Bundled Git: GPLv2. Ramoso runs it as a separate program, which doesn’t affect Ramoso’s license; releases include Git’s license text and a link to the exact source.
 - Geist fonts: SIL Open Font License; license file shipped with the fonts.
 
-## 11. To verify in a spike, before building on them
+## 11. Spike results (Nov 2026)
 
-1. The bundled Git runs from the Tauri resource folder on Linux and Windows: executable bits survive bundling (AppImage, `.deb`), and HTTPS clone works with the bundled CA file.
-2. The Windows build includes `sh`, so hooks run; a husky / lint-staged hook passes in a test repo.
-3. The login-shell environment capture works on KDE with asdf: a hook that calls `node` succeeds when Ramoso starts from the app menu.
-4. Git Credential Manager on Linux saves to KWallet through Secret Service (and what it needs configured), and `git credential fill` returns the token for API calls.
-5. The ask-pass helper: Git and SSH prompts reach a Ramoso dialog on Linux and Windows.
-6. A diff library for word diff and moved lines (`similar` or another) handles a 20,000-line file fast enough.
-7. Bundled Git version versus the user’s system Git: a repo created by a newer system Git (for example with reftable) opens, or fails with a clear message.
+Tested on openSUSE Leap 15.4 with KDE Plasma (glibc 2.31) and on Windows (by hand). The spike code is on branch `feat/platform-risks-spike`.
+
+| # | Question | Result | How it was tested |
+| --- | --- | --- | --- |
+| 1 | The bundled Git runs from the packaged app; executable bits survive; HTTPS works | **Yes**, Linux (AppImage) and Windows (installer) | A test app ran `git --version`, a commit and an HTTPS `ls-remote` from inside each package. Linux uses the system’s CA bundle instead of a bundled one (keeps company CAs working); Windows uses its own certificate store |
+| 2 | Hooks run on Windows | **Yes**: `usr\bin\sh.exe` is in the bundle and ran a pre-commit hook calling `node` | Test app on Windows |
+| 3 | Hooks see the user’s PATH when started from the desktop | **Yes** | On KDE, apps already receive the session’s PATH (asdf found); the login-shell capture also worked as a safety net. On Windows, `node` from nvm for Windows was found |
+| 4 | Credentials from the OS store reach Git | **Yes**, with a changed design: Git Credential Manager dropped, Ramoso is the helper (§5.6) | A test helper saved a token through `keyring` and Git read it back with every other source switched off. The token was found over D-Bus in GNOME Keyring’s `login` collection, not in KWallet |
+| 5 | Login and passphrase prompts reach Ramoso | **Partial:** Linux yes; Windows untested (SSH there goes through the bundled `usr\bin\ssh.exe`) | A stand-in ask-pass script received Git’s “Username/Password for https://github.com” prompts and an `ssh-add` passphrase prompt (`SSH_ASKPASS_REQUIRE=force`, OpenSSH 8.4) |
+| 6 | The diff library is fast enough on 20,000 lines | **Yes**: under 10 ms (§5.3) | Benchmark with 1,000 edited lines and a moved 200-line block, Myers and Patience |
+| 7 | A repo made by a newer system Git (reftable) works | **Yes** | Repo created by system Git 2.56 with `--ref-format=reftable`; the bundled Git ran status, log and branch in it |
+
+**Changed by the spike:** Linux Git built from source (dugite’s needs glibc 2.34); Git Credential Manager dropped; token sign-in first, browser sign-in later; AppImages through quick-sharun, not Tauri’s linuxdeploy step; CI postponed; Windows-specific runner rules (§5.1).
+
+**Known limits, for milestone 1 and later:**
+
+- A real husky / lint-staged setup was not tested, only a plain `sh` hook calling `node`.
+- The current Linux build makes only an AppImage; `.deb`/`.rpm` need their own pipeline.
+- Ask-pass and credentials were tested on Linux only; macOS was not tested at all.
+- The OS store was proven through GNOME Keyring only. Not tested: KDE without GNOME Keyring, where KWallet itself must provide Secret Service; milestone 8 tests on such a setup.
+- The AppImage was tested on one machine only (openSUSE Leap 15.4, KDE). No other distros yet.
+- Moved-line detection (Ramoso’s own block matching) has no speed test yet.
+- The spike’s test helper returned a fixed username and ignored Git’s `store`; the real helper returns the account’s username, and Ramoso saves credentials itself (§5.6).
 
 ## 12. Still open
 
 - Activity snapshot retention and disk budget (spec §13).
 - Whether to generate TypeScript types from Rust (`tauri-specta`) instead of writing them by hand.
+- Registering Ramoso’s OAuth apps on GitHub and GitLab.com, for browser sign-in (roadmap milestone 14).
+- When to set up CI.

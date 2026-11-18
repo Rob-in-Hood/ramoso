@@ -7,7 +7,7 @@ This roadmap orders the work that builds everything in [interface-spec.md](../in
 ## How milestones work
 
 - **One plan per milestone.** Written and approved before any code for that milestone. Milestone 0 is a throwaway spike and has no plan; its results go into architecture.md §11.
-- **Each milestone ships a working app.** Main is always buildable, and CI is green on Linux, Windows and macOS.
+- **Each milestone ships a working app.** Main is always buildable: the Linux AppImage and the Windows installer build locally in Docker, and all tests pass. CI is postponed (architecture §9).
 - **Screens are built against the design.** The design screens named for each milestone are the visual reference (in the local `design/` folder, not versioned). They are rebuilt with Tailwind and shadcn/ui, not copied.
 - **Data first, then screen.** Within a milestone, the Rust module and its tests land before the screen that uses it.
 - **Settings grow with features.** Each milestone adds its own options to Settings; milestone 13 adds settings search and the remaining groups.
@@ -19,7 +19,9 @@ These apply to every task in every plan:
 - Git runs only through `git::run` with the bundled Git. No other code starts a Git process.
 - Every Git command appears in the Console, including background ones (shown dimmed).
 - Destructive actions (discard, hard reset, checkout with clashes, stash drop, force push, branch delete) show a preview first and save a snapshot or backup before running.
-- Secrets never reach a file, log, Console entry or Git config in plain text.
+- Secrets never reach a file, log, Console entry or Git config in plain text, never appear in command-line arguments, and never reach the webview.
+- Errors are reported, never silently dropped; when something is deliberately ignored, a comment says why.
+- No template leftovers or unused dependencies; the Content Security Policy is strict.
 - Network and sign-in problems pause sync only; local work keeps working.
 - The safe option is pre-selected and labelled; destructive options are red and never pre-selected.
 - Plain names first, then the Git term in small monospace (“Keep the changes, unstaged · --mixed”).
@@ -49,25 +51,28 @@ These apply to every task in every plan:
 | 11 | Worktrees and submodules | §6 (part) | UC-11 |
 | 12 | Pull requests | §10 | UC-13 |
 | 13 | Finish | §2 sizes, §11, §13 | all 14, re-run |
+| 14 | Browser sign-in | §3 accounts, §7 sign-in | UC-1 (browser part) |
 
 ### 0. Spike (throwaway)
 
-Answers the seven questions in architecture §11 before anything is built on them. Code lives on a throwaway branch and is deleted afterwards.
+Answers the seven questions in architecture §11 before anything is built on them. Code lives on the branch `feat/platform-risks-spike`, kept as a reference; milestone 1 copies its build setups.
 
-- **Done when:** each of the seven items is marked confirmed or replaced with a working alternative in architecture.md §11, tested on Linux (KDE) by hand and on Windows in CI.
+- **Done when:** each of the seven items is marked confirmed or replaced with a working alternative in architecture.md §11, tested on Linux (KDE) and on Windows by hand.
+- **Done (Nov 19, 2026).** Six confirmed; item 5 (ask-pass) is partial: Linux only, Windows untested. Results, design changes and known limits are in architecture §11. Windows was tested by hand instead of in CI.
 
 ### 1. Foundation
 
 - **Scope:**
   - Project scaffold: Vite, React, TypeScript, Tailwind, shadcn/ui, Zustand, TanStack Query, Vitest, Playwright, Tauri 2.
-  - Bundled Git download script with checksum, wired into `bundle.resources`.
-  - `git::run` with the bundled environment, login-shell environment, write queue, secret masking, known-error table and Console entries.
+  - Build setups from the spike (`build/`): static Linux Git, Linux AppImage (quick-sharun), Windows installer (cargo-xwin, NSIS); one shared `docker run` script; the tool manifest (Git, curl, Git LFS, dugite builds, with checksums).
+  - Pruned Linux Git (about 37 MB) and the AppImage’s debloated packages.
+  - `git::run` with the bundled environment, login-shell environment, write queue, secret masking, known-error table and Console entries, following the runner rules in architecture §5.1 (no inherited ask-pass, cleared credential helpers, Windows `CREATE_NO_WINDOW`, case-insensitive environment, plain paths, separate stdout/stderr, no hardcoded `/usr` paths).
   - `ipc.ts`, the `repo-changed` and `console-entry` events, and `mockIPC` setup for Playwright.
   - Theme tokens (dark, light, match system), Geist fonts bundled, the shortcut table.
   - App frame: custom title bar with window controls and dragging, collapsed repo rail, sidebar, Console bar, and a basic Console panel listing entries.
-  - CI matrix (Linux, Windows, macOS), license files, README.
+  - License files; README with build and install instructions.
 - **Design screens:** brand mark (logo and app icon), history and diff (frame only), narrow window (frame only).
-- **Done when:** the app starts on all three OSes in CI, shows the frame in both themes, and running `git --version` through the runner shows up in the Console with the bundled version.
+- **Done when:** the AppImage and the Windows installer build in Docker; the app starts on Linux and Windows, shows the frame in both themes, and running `git --version` through the runner shows up in the Console with the bundled version.
 
 ### 2. Getting a repository
 
@@ -107,7 +112,7 @@ Answers the seven questions in architecture §11 before anything is built on the
   - Detached HEAD.
   - Loading a large repository (commit-graph write).
 - **Design screens:** history and diff, split diff, image and special file diffs, full-width log, blame and file history, detached HEAD, loading a large repository.
-- **Done when:** UC-3 passes; a 20,000-line file diff renders within the time set in the spike; the graph matches `git log --graph` on a test repo with merges.
+- **Done when:** UC-3 passes; on the spike’s 20,000-line test file, line diff + word highlights + moved-line matching take ≤ 50 ms, and clicking the file to the diff on screen takes ≤ 100 ms; the graph matches `git log --graph` on a test repo with merges.
 
 ### 5. Activity and undo
 
@@ -145,14 +150,15 @@ Answers the seven questions in architecture §11 before anything is built on the
 ### 8. Credentials and hosts
 
 - **Scope:**
-  - `creds` (Git Credential Manager, `keyring`, kernel-keyring fallback).
+  - `creds` as in architecture §5.6: `keyring-core` with the ordered platform stores, memory-only fallback that tells the user, and Ramoso as Git’s credential helper (`quit=1` when nothing is stored). Token sign-in only; browser sign-in is milestone 14.
   - Ask-pass dialogs for credentials and SSH passphrases.
+  - Settings → Accounts shows where secrets are stored (for example “Stored in: GNOME Keyring”).
   - `Provider` trait with the GitHub and GitLab adapters (account, repos, create repo, delete branch, SSH key check).
   - Setup step 2 and Settings → Accounts.
   - Clone host tabs, Publish to a host on Create, “Also delete on \<remote\>”.
   - Sign-in failed.
 - **Design screens:** sign-in needed, first launch (accounts), clone a repository (host tabs), create a repository (publish), settings (commits and signing: key picker).
-- **Done when:** UC-1 and UC-9 pass (adapters tested against recorded API responses); on KDE, a restart doesn’t ask for credentials again.
+- **Done when:** UC-1 (with a pasted token instead of the browser) and UC-9 pass (adapters tested against recorded API responses); on KDE, a restart doesn’t ask for credentials again.
 
 ### 9. Conflicts and rewriting history
 
@@ -200,20 +206,32 @@ Answers the seven questions in architecture §11 before anything is built on the
   - Reduced motion.
   - Accessibility audit.
   - WebdriverIO smoke tests on Linux and Windows.
-  - Release packaging (AppImage, `.deb`, Windows installer, `.dmg`) with Git’s license and source link.
+  - Release packaging (AppImage, Windows installer, `.dmg` built on a Mac) with Git’s license and source link.
 - **Design screens:** settings (both), history and diff (light theme), narrow window.
-- **Done when:** all 14 scenarios pass in one run; installers build in CI on all three OSes.
+- **Done when:** all 14 scenarios pass in one run; the AppImage and Windows installer build in Docker, and the `.dmg` builds on a Mac.
+
+### 14. Browser sign-in
+
+Starts once the core (milestones 1–13) is done.
+
+- **Scope:**
+  - Register Ramoso’s OAuth apps on GitHub and GitLab.com (public client IDs; no secrets in the app).
+  - Device sign-in for GitHub and GitLab.com: show the code, open the browser, poll for the token.
+  - Token refresh in the running app, one refresh at a time (GitLab replaces both tokens on every refresh).
+  - “Sign in with \<host\>” in setup step 2, Accounts and Sign-in failed.
+- **Design screens:** sign-in needed, first launch (accounts).
+- **Done when:** UC-1 passes with browser sign-in on GitHub, and the same flow works on GitLab.com.
 
 ## Spec coverage
 
 | Spec section | Milestones |
 | --- | --- |
 | §2 App shell | 1 (frame, Console bar), 2 (rail, repo switcher), 6 (branch switcher), 7 (Fetch, Pull, Push), 13 (window sizes) |
-| §3 Getting a repository | 2; accounts parts in 8 |
+| §3 Getting a repository | 2; accounts parts in 8 (tokens) and 14 (browser sign-in) |
 | §4 Changes and committing | 3; stash conflicts in 9 |
 | §5 History and the diff viewer | 4 |
 | §6 Branches, tags, remotes, worktrees, submodules | 6, 11 |
-| §7 Sync | 7; sign-in failed in 8 |
+| §7 Sync | 7; sign-in failed in 8, browser fix in 14 |
 | §8 Conflicts and rewriting history | 9 |
 | §9 Activity and undo | 3 (recording), 5 |
 | §10 Command palette, Console, pull requests | 1 (basic Console), 10, 12 |
@@ -224,3 +242,4 @@ Answers the seven questions in architecture §11 before anything is built on the
 ## Open
 
 - Activity snapshot retention and disk budget (interface spec §13); needed by milestone 5.
+- When to set up CI (postponed; builds and tests run locally until then).
