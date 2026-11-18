@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ramoso
+Comment=Checks the bundled Git and the hook environment
+Exec=tauri-app
+Icon=ramoso-spike
+Categories=Development;
+Terminal=false
+StartupWMClass=tauri-app

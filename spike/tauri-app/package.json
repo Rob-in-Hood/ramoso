@@ -1,0 +1,24 @@
+{
+  "name": "tauri-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "docker:image:linux": "DOCKER_BUILDKIT=0 docker build -t ramoso-spike-linux ../app-linux",
+    "docker:image:windows": "DOCKER_BUILDKIT=0 docker build -t ramoso-spike-windows ../app-windows",
+    "windows:setup": "docker run --rm --user \"$(id -u):$(id -g)\" -e HOME=/tmp -e CARGO_HOME=/workspace/spike/tauri-app/.cache/cargo -e XWIN_CACHE_DIR=/workspace/spike/tauri-app/.cache/xwin -v \"$(git rev-parse --show-toplevel)\":/workspace -w /workspace/spike/tauri-app ramoso-spike-windows sh -c 'pnpm install --frozen-lockfile --store-dir .cache/pnpm-store && pnpm tauri build --ci --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis' && cp src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe ../app/ramoso-setup.exe",
+    "linux:appimage":"docker run --rm --user \"$(id -u):$(id -g)\" -e HOME=/tmp -e CARGO_HOME=/workspace/spike/tauri-app/.cache/cargo -e CARGO_TARGET_DIR=/workspace/spike/tauri-app/.cache/target-linux -v \"$(git rev-parse --show-toplevel)\":/workspace -w /workspace/spike/tauri-app ramoso-spike-linux ../app-linux/build-appimage.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^8.0.16",
+    "typescript": "~6.0.3"
+  }
+}

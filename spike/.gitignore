@@ -1,0 +1,6 @@
+# Build output and downloaded binaries; rebuilt or re-downloaded, never committed.
+cred-helper/target/
+diff-bench/target/
+git-linux/out/
+git-windows/
+app/
