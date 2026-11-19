@@ -3,3 +3,15 @@
 
 # Spike build output and caches; the spike's code lives on branch feat/platform-risks-spike
 /spike/
+
+# Dependencies and build output
+node_modules/
+/dist/
+/dist-e2e/
+/dist-app/
+/.cache/
+/test-results/
+/playwright-report/
+
+# Agent progress ledgers (local scratch)
+/.superpowers/
