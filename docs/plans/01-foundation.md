@@ -15,7 +15,7 @@
 - **Tool manifest:** `build/tools.txt`, one line per tool: `name version url sha256`. Architecture §9 says “Updating Git is one line”; `KEY=value` would need three lines per tool, JSON several. Read by `build/fetch-tools.sh` with `while read`.
 - **Runner:** the full `RunOpts` from architecture §5.1 (source, stdin, stream channel, cancel token, write flag), including Cancel.
 - **Theme UI:** a minimal Settings screen with only Appearance → Theme, saved with the Tauri store plugin.
-- **Git flow:** branch `m1-foundation`, one commit per task, merged into `main` once every “Done when” item is checked.
+- **Git flow:** GitHub Flow. One short-lived branch and one pull request per task, off `main`, named by the Conventional Branch spec (`feat/tool-manifest`, `feat/git-runner`, `fix/…`, `chore/readme` for docs-only work). Each pull request is merged before the next task starts, so none grows large, and every task leaves `main` building with all tests green. Tasks 0 and 1 share the first pull request (`feat/scaffold`). Commit messages: Conventional Commits with only the first letter capital, `Type(scope): description` (`Feat: scaffold Tauri, React and test setup`).
 - **Runner state:** `git::run(repo, args, opts)` keeps the architecture’s signature. Its state (Git location, base environment, queues, Console log, entry callback) lives in one `Runner` set once at startup by `git::init`. Tests call `git::init` with a temp setup; no Tauri needed.
 
 ## Global Constraints
@@ -95,7 +95,7 @@ LICENSE-MIT, LICENSE-APACHE, README.md
 
 ### Task 0: Branch
 
-- [ ] **Step 1:** `git switch -c m1-foundation` from `main`. Expected: `git status` shows the new branch, clean.
+- [ ] **Step 1:** Before every task, `git switch main && git pull`, then `git switch -c <type>/<topic>`. Expected: `git status` shows the new branch, clean. Each task ends by pushing its branch and opening a pull request into `main`.
 
 ### Task 1: Scaffold
 
@@ -393,4 +393,4 @@ test('frame renders in both themes', async ({ page }) => { /* screenshot-free: h
 - [ ] **Step 2: Manual check, Linux (KDE):** AppImage starts; frame in dark and light; first Console entry is `git --version` → `git version 2.56.1`; window drag, double-click maximise, minimise, close work.
 - [ ] **Step 3: Manual check, Windows:** same checks with the installer; no console window flashes.
 - [ ] **Step 4:** Tick milestone 1 scope and “Done when” in `roadmap.md`, status ✅ with the date.
-- [ ] **Step 5: Commit** `docs: README and milestone 1 done`; merge `m1-foundation` into `main` after review.
+- [ ] **Step 5: Commit** `docs: README and milestone 1 done`; push the branch and open its pull request into `main`.
