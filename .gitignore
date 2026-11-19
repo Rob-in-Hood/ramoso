@@ -1,2 +1,5 @@
 # Design source files (large; kept locally, not versioned)
 /design/
+
+# Spike build output and caches; the spike's code lives on branch feat/platform-risks-spike
+/spike/
