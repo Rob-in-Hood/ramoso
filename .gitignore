@@ -3,3 +3,6 @@
 
 # Spike build output and caches; the spike's code lives on branch feat/platform-risks-spike
 /spike/
+
+# Agent progress ledgers (local scratch)
+/.superpowers/
